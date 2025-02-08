@@ -1,0 +1,246 @@
+# API Deployment with Load Balancing and Database on VM's
+
+## Project Overview
+This project involves setting up a high-availability API system using FastAPI, Nginx as a load balancer, and PostgreSQL as the database. The architecture consists of three VMs:
+
+1. **LB-VM (Load Balancer VM):** Runs Nginx to distribute API requests in a round-robin fashion.
+2. **APP-VM1 & APP-VM2 (Application VMs):** Run FastAPI applications to process API requests.
+3. **DB-VM (Database Server - Hosted on LB-VM):** Runs PostgreSQL, storing application data securely.
+
+### Key Implementations:
+- **Network Setup:** Configured network adapters and `/etc/hosts` for inter-VM communication.
+- **Load Balancer:** Nginx setup for API traffic distribution.
+- **Application Deployment:** FastAPI setup with environment variables for DB connection.
+- **Database Security:** PostgreSQL configured with user-based authentication and restricted access.
+- **Firewall Rules:** Implemented security policies to allow only necessary traffic.
+- **Systemd Services:** Ensured FastAPI and Nginx restart on reboot.
+- **Logging & Monitoring:** Configured Nginx access logs for tracking API requests.
+
+---
+
+## 1. VM Creation and Network Configuration
+
+### 1.1 Create Virtual Machines
+Three virtual machines were created:
+- **LB-VM** (Load Balancer)
+- **APP-VM1** (Application Server 1)
+- **APP-VM2** (Application Server 2)
+
+### 1.2 Configure `/etc/hosts`
+This allows VMs to resolve each other’s hostnames without relying on external DNS.
+
+```sh
+sudo nano /etc/hosts
+```
+Add the following entries:
+```
+192.168.56.101 app-vm1
+192.168.56.102 app-vm2
+192.168.56.103 lb-vm
+```
+This ensures that each VM can reach others using their hostname.
+
+---
+
+## 2. Nginx Load Balancer Setup
+
+### 2.1 Install Nginx on Load Balancer VM
+```sh
+sudo yum install -y nginx
+```
+
+### 2.2 Configure Nginx for Load Balancing
+```sh
+sudo nano /etc/nginx/nginx.conf
+```
+
+Add the following upstream block:
+```
+upstream api_backend {
+    server 192.168.56.101:8000;
+    server 192.168.56.102:8000;
+}
+server {
+    listen 80;
+    location / {
+        proxy_pass http://api_backend;
+    }
+}
+```
+
+### 2.3 Restart Nginx and Enable Logs
+```sh
+sudo systemctl restart nginx
+sudo systemctl enable nginx
+```
+
+---
+
+## 3. Application Setup (FastAPI)
+
+### 3.1 Install Python and Dependencies on Both APP-VMs
+```sh
+sudo yum install -y python3 python3-venv
+python3 -m venv /opt/api_project/venv
+source /opt/api_project/venv/bin/activate
+pip install fastapi uvicorn psycopg2
+```
+
+### 3.2 Create FastAPI Application
+```sh
+mkdir /opt/api_project
+nano /opt/api_project/main.py
+```
+
+Paste the following:
+```python
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def read_root():
+    return {"message": "FastAPI running on appvm"}
+```
+
+### 3.3 Start FastAPI Server
+```sh
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### 3.4 Enable Systemd Service for FastAPI
+Create a systemd service file to auto-start FastAPI on boot.
+
+```sh
+sudo nano /etc/systemd/system/fastapi.service
+```
+```
+[Unit]
+Description=FastAPI Application
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/opt/api_project
+ExecStart=/opt/api_project/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Reload systemd:
+```sh
+sudo systemctl daemon-reload
+sudo systemctl start fastapi
+sudo systemctl enable fastapi
+```
+
+---
+
+## 4. PostgreSQL Setup
+
+### 4.1 Install PostgreSQL on LB-VM
+```sh
+sudo yum install -y postgresql-server postgresql-contrib
+sudo postgresql-setup initdb
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+```
+
+### 4.2 Create Database and User
+```sh
+sudo -i -u postgres psql
+```
+```sql
+CREATE DATABASE cars_db;
+CREATE USER api_user WITH ENCRYPTED PASSWORD '82338233';
+GRANT ALL PRIVILEGES ON DATABASE cars_db TO api_user;
+```
+
+### 4.3 Allow Only APP-VMs to Access PostgreSQL
+Edit `pg_hba.conf`:
+```sh
+sudo nano /var/lib/pgsql/data/pg_hba.conf
+```
+Add:
+```
+host    api_db    api_user    192.168.56.101/32    md5
+host    api_db    api_user    192.168.56.102/32    md5
+```
+
+Restart PostgreSQL:
+```sh
+sudo systemctl restart postgresql
+```
+
+---
+
+## 5. Firewall Configuration
+
+### 5.1 Open Required Ports on All VMs
+```sh
+sudo firewall-cmd --permanent --add-port=8000/tcp
+sudo firewall-cmd --permanent --add-port=80/tcp
+sudo firewall-cmd --reload
+```
+
+This ensures only required ports are open.
+
+---
+
+## 6. Testing API Deployment
+
+### 6.1 Test FastAPI on APP-VMs
+```sh
+curl http://192.168.56.101:8000
+curl http://192.168.56.102:8000
+```
+
+### 6.2 Test Load Balancer Functionality
+```sh
+for i in {1..10}; do curl http://192.168.56.103; echo ""; done
+```
+
+This should distribute traffic between both application VMs.
+
+---
+
+## 7. Monitoring & Logging
+
+### 7.1 Enable Nginx Access Logs
+Nginx logs API requests for monitoring.
+
+Check logs:
+```sh
+sudo tail -f /var/log/nginx/access.log
+```
+
+### 7.2 Enable FastAPI Logging
+Modify `main.py`:
+```python
+import logging
+
+logging.basicConfig(filename="api.log", level=logging.INFO)
+
+@app.get("/")
+def read_root():
+    logging.info("API accessed successfully")
+    return {"message": "FastAPI running on appvm"}
+```
+
+This logs every API request.
+
+---
+
+## Conclusion
+
+This setup provides a fully functional API system with:
+- Load balancing (Nginx)
+- Secure database access (PostgreSQL)
+- Auto-start services (Systemd)
+- Security measures (Firewall, authentication)
+- Logging and monitoring
+
+This ensures a scalable and fault-tolerant architecture.
+
